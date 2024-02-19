@@ -9,11 +9,11 @@ load_dotenv()
 logging.basicConfig(filename="app.log", level=logging.INFO)
 
 
-def mongodump(database, outpath):
+def mongodump(uri, outpath):
     command = [
         "mongodump",
         "--uri",
-        database,
+        uri,
         "--out",
         outpath,
     ]
@@ -24,7 +24,7 @@ def mongodump(database, outpath):
         logging.error(f"Backup failed: {e}")
 
 
-def uploadtos3(outpath, bucket):
+def uploadtos3(outpath, bucket, max_backups):
     s3 = boto3.client("s3")
     current_date = datetime.now().date()
     path = None
@@ -38,18 +38,26 @@ def uploadtos3(outpath, bucket):
         if datestr:
             no = int(datestr.split("_")[1])
             if no:
+                if no == max_backups:
+                    logging.error(
+                        "Today's Backups are already stored. Come Back tomorrow"
+                    )
+                    return
                 path = f"{current_date}_{no + 1}"
             else:
                 path = f"{current_date}_1"
         else:
             path = f"{current_date}_1"
-
         for root, _, files in os.walk(outpath):
+            if (root == "admin") or (root == "config") or (root == "local"):
+                continue
             for file in files:
                 local_path = os.path.join(root, file)
-                s3_path = f"{path}/{file}"
-                s3.upload_file(local_path, bucket, s3_path)
-                logging.info(f"File uploaded successfully: {s3_path}")
+                if os.path.splitext(file)[1] == ".json":
+                    continue
+                key = f"{path}/{os.path.split(root)[-1]}/{os.path.splitext(file)[0]}/{file}"
+                s3.upload_file(local_path, bucket, key)
+                logging.info(f"File uploaded successfully: {key}")
     except Exception as e:
         logging.error(f"An error occurred: {e}")
 
@@ -60,7 +68,9 @@ def download_from_s3(bucket, folder, s3objpath):
         objects = s3.list_objects_v2(Bucket=bucket, Prefix=folder)["Contents"]
         for obj in objects:
             key = obj["Key"]
-            with open(os.path.join(s3objpath, obj["Key"].split("/")[1]), "wb") as f:
+            if not os.path.exists(os.path.join(s3objpath, os.path.dirname(key))):
+                os.makedirs(os.path.join(s3objpath, os.path.dirname(key)))
+            with open(os.path.join(s3objpath, obj["Key"]), "wb") as f:
                 s3.download_fileobj(bucket, key, f)
             logging.info("file with key: " + key + " downloaded from s3")
     except Exception as e:
@@ -68,13 +78,8 @@ def download_from_s3(bucket, folder, s3objpath):
 
 
 def mongorestore(uri, s3objpath):
-    command = [
-        "mongorestore",
-        "--uri",
-        uri,
-        s3objpath,
-    ]
     try:
+        command = ["mongorestore", "--uri", uri, s3objpath]
         subprocess.run(command, check=True)
         logging.info("Restore completed successfully.")
     except subprocess.CalledProcessError as e:
@@ -89,8 +94,10 @@ if __name__ == "__main__":
     folder = os.getenv("folder")
     s3objpath = os.getenv("s3objpath")
     destination_uri = os.getenv("destination_uri")
+    max_backups = os.getenv("max_backups")
 
     mongodump(source_uri, outpath)
-    uploadtos3(outpath, bucket)
+    uploadtos3(outpath, bucket, max_backups)
     download_from_s3(bucket, folder, s3objpath)
+    # change s3objpath variable according to db folder when running this restoration command
     mongorestore(destination_uri, s3objpath)
