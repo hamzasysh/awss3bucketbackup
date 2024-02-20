@@ -31,21 +31,16 @@ def uploadtos3(outpath, bucket, max_backups):
     datestr = None
 
     try:
-        for i in range(1, 5):
+        for i in range(1, max_backups + 1):
             temp = s3.list_objects_v2(Bucket=bucket, Prefix=f"{current_date}_{i}")
             if "Contents" in temp:
                 datestr = f"{current_date}_{i}"
         if datestr:
             no = int(datestr.split("_")[1])
-            if no:
-                if no == max_backups:
-                    logging.error(
-                        "Today's Backups are already stored. Come Back tomorrow"
-                    )
-                    return
-                path = f"{current_date}_{no + 1}"
-            else:
-                path = f"{current_date}_1"
+            if no == max_backups:
+                logging.error("Today's Backups are already stored. Come Back tomorrow")
+                return
+            path = f"{current_date}_{no + 1}"
         else:
             path = f"{current_date}_1"
         for root, _, files in os.walk(outpath):
@@ -61,6 +56,7 @@ def uploadtos3(outpath, bucket, max_backups):
                     key = f"{path}/{os.path.split(root)[-1]}/{os.path.splitext(file)[0]}/{file}"
                 s3.upload_file(local_path, bucket, key)
                 logging.info(f"File uploaded successfully: {key}")
+        return path
     except Exception as e:
         logging.error(f"An error occurred: {e}")
 
@@ -103,7 +99,7 @@ def cleanup_backups(bucket):
     four_days_ago = datetime.now() - timedelta(days=4)
     four_days_ago = four_days_ago.date()
     try:
-        for i in range(1, 4):
+        for i in range(1, max_backups):
             folder = s3.list_objects_v2(Bucket=bucket, Prefix=f"{four_days_ago}_{i}")
             if "Contents" in folder:
                 boto3.resource("s3").Bucket(bucket).objects.filter(
@@ -120,14 +116,15 @@ if __name__ == "__main__":
     source_uri = os.getenv("source_uri")
     outpath = os.getenv("outpath")
     bucket = os.getenv("bucket")
-    folder = os.getenv("folder")
+    # folder = os.getenv("folder")
     s3objpath = os.getenv("s3objpath")
     destination_uri = os.getenv("destination_uri")
     max_backups = os.getenv("max_backups")
-    rfolder = os.getenv("restorefolder")
+    # rfolder = os.getenv("restorefolder")
 
     mongodump(source_uri, outpath)
     cleanup_backups(bucket)
-    uploadtos3(outpath, bucket, max_backups)
+    folder = uploadtos3(outpath, bucket, max_backups)
     download_from_s3(bucket, folder, s3objpath)
+    rfolder = os.path.join(s3objpath, folder)
     mongorestore(destination_uri, rfolder)
