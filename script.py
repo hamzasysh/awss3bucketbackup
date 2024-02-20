@@ -2,7 +2,7 @@ import subprocess
 import os
 import boto3
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -31,7 +31,7 @@ def uploadtos3(outpath, bucket, max_backups):
     datestr = None
 
     try:
-        for i in range(1, 8):
+        for i in range(1, 5):
             temp = s3.list_objects_v2(Bucket=bucket, Prefix=f"{current_date}_{i}")
             if "Contents" in temp:
                 datestr = f"{current_date}_{i}"
@@ -53,9 +53,12 @@ def uploadtos3(outpath, bucket, max_backups):
                 continue
             for file in files:
                 local_path = os.path.join(root, file)
-                if os.path.splitext(file)[1] == ".json":
-                    continue
-                key = f"{path}/{os.path.split(root)[-1]}/{os.path.splitext(file)[0]}/{file}"
+                if file.endswith(".metadata.json"):
+                    key = (
+                        f"{path}/{os.path.split(root)[-1]}/{file.split('.')[0]}/{file}"
+                    )
+                else:
+                    key = f"{path}/{os.path.split(root)[-1]}/{os.path.splitext(file)[0]}/{file}"
                 s3.upload_file(local_path, bucket, key)
                 logging.info(f"File uploaded successfully: {key}")
     except Exception as e:
@@ -68,22 +71,48 @@ def download_from_s3(bucket, folder, s3objpath):
         objects = s3.list_objects_v2(Bucket=bucket, Prefix=folder)["Contents"]
         for obj in objects:
             key = obj["Key"]
-            if not os.path.exists(os.path.join(s3objpath, os.path.dirname(key))):
-                os.makedirs(os.path.join(s3objpath, os.path.dirname(key)))
-            with open(os.path.join(s3objpath, obj["Key"]), "wb") as f:
+            if not os.path.exists(
+                (os.path.join(s3objpath, key.split("/")[0], key.split("/")[1]))
+            ):
+                os.makedirs(
+                    os.path.join(s3objpath, key.split("/")[0], key.split("/")[1])
+                )
+            with open(
+                os.path.join(
+                    s3objpath, key.split("/")[0], key.split("/")[1], key.split("/")[3]
+                ),
+                "wb",
+            ) as f:
                 s3.download_fileobj(bucket, key, f)
             logging.info("file with key: " + key + " downloaded from s3")
     except Exception as e:
         logging.error(f"Backup failed: {e}")
 
 
-def mongorestore(uri, s3objpath):
+def mongorestore(uri, rfolder):
     try:
-        command = ["mongorestore", "--uri", uri, s3objpath]
+        command = ["mongorestore", "--uri", uri, rfolder]
         subprocess.run(command, check=True)
         logging.info("Restore completed successfully.")
     except subprocess.CalledProcessError as e:
         logging.error(f"Restore failed: {e}")
+
+
+def cleanup_backups(bucket):
+    s3 = boto3.client("s3")
+    four_days_ago = datetime.now() - timedelta(days=4)
+    four_days_ago = four_days_ago.date()
+    try:
+        for i in range(1, 4):
+            folder = s3.list_objects_v2(Bucket=bucket, Prefix=f"{four_days_ago}_{i}")
+            if "Contents" in folder:
+                boto3.resource("s3").Bucket(bucket).objects.filter(
+                    Prefix=f"{four_days_ago}_{i}"
+                ).delete()
+            else:
+                logging.info(f"No backup exist for date {four_days_ago}_{i}.")
+    except Exception as e:
+        logging.error(f"Backup cleaning failed: {e}")
 
 
 if __name__ == "__main__":
@@ -95,9 +124,10 @@ if __name__ == "__main__":
     s3objpath = os.getenv("s3objpath")
     destination_uri = os.getenv("destination_uri")
     max_backups = os.getenv("max_backups")
+    rfolder = os.getenv("restorefolder")
 
     mongodump(source_uri, outpath)
+    cleanup_backups(bucket)
     uploadtos3(outpath, bucket, max_backups)
     download_from_s3(bucket, folder, s3objpath)
-    # change s3objpath variable according to db folder when running this restoration command
-    mongorestore(destination_uri, s3objpath)
+    mongorestore(destination_uri, rfolder)
