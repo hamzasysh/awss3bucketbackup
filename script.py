@@ -123,8 +123,9 @@ if __name__ == "__main__":
     # rfolder = os.getenv("restorefolder")
 
     mongodump(source_uri, outpath)
-    cleanup_backups(bucket)
     folder = uploadtos3(outpath, bucket, max_backups)
     download_from_s3(bucket, folder, s3objpath)
     rfolder = os.path.join(s3objpath, folder)
     mongorestore(destination_uri, rfolder)
+    cleanup_backups(bucket)
+
