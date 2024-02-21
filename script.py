@@ -1,6 +1,7 @@
 import subprocess
 import os
 import boto3
+import argparse
 import logging
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
@@ -113,6 +114,13 @@ def cleanup_backups(bucket):
 
 if __name__ == "__main__":
 
+    parser = argparse.ArgumentParser(description="AWS S3 & MongoDB Script")
+    parser.add_argument("--backup", action="store_true", help="Perform backup operation")
+    parser.add_argument("--restore", action="store_true", help="Perform restore operation")
+    parser.add_argument("--cleanup", action="store_true", help="Perform cleanup operation")
+
+    args = parser.parse_args()
+
     source_uri = os.getenv("source_uri")
     outpath = os.getenv("outpath")
     bucket = os.getenv("bucket")
@@ -122,10 +130,20 @@ if __name__ == "__main__":
     max_backups = os.getenv("max_backups")
     # rfolder = os.getenv("restorefolder")
 
-    mongodump(source_uri, outpath)
-    folder = uploadtos3(outpath, bucket, max_backups)
-    download_from_s3(bucket, folder, s3objpath)
-    rfolder = os.path.join(s3objpath, folder)
-    mongorestore(destination_uri, rfolder)
-    cleanup_backups(bucket)
+    if args.backup:
+        mongodump(source_uri, outpath)
+        folder = uploadtos3(outpath, bucket, max_backups)
+    if args.restore:
+        download_from_s3(bucket, folder, s3objpath)
+        rfolder = os.path.join(s3objpath, folder)
+        mongorestore(destination_uri, rfolder)
+    if args.cleanup:
+        cleanup_backups(bucket)
+    else:
+        mongodump(source_uri, outpath)
+        folder = uploadtos3(outpath, bucket, max_backups)
+        download_from_s3(bucket, folder, s3objpath)
+        rfolder = os.path.join(s3objpath, folder)
+        mongorestore(destination_uri, rfolder)
+
 
