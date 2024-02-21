@@ -3,6 +3,7 @@ import os
 import boto3
 import argparse
 import logging
+from ProgressPercentage import ProgressPercentage
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
@@ -19,8 +20,14 @@ def mongodump(uri, outpath):
         outpath,
     ]
     try:
-        subprocess.run(command, check=True)
-        logging.info("Backup completed successfully.")
+        with open("app.log", "a") as f:
+            print("Backup started successfully.")
+            result = subprocess.run(
+                command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            f.write(result.stdout.decode("utf-8"))
+            f.write(result.stderr.decode("utf-8"))
+            print("Backup completed successfully.")
     except subprocess.CalledProcessError as e:
         logging.error(f"Backup failed: {e}")
 
@@ -55,7 +62,12 @@ def uploadtos3(outpath, bucket, max_backups):
                     )
                 else:
                     key = f"{path}/{os.path.split(root)[-1]}/{os.path.splitext(file)[0]}/{file}"
-                s3.upload_file(local_path, bucket, key)
+                s3.upload_file(
+                    local_path,
+                    bucket,
+                    key,
+                    Callback=ProgressPercentage(local_path, "app.log"),
+                )
                 logging.info(f"File uploaded successfully: {key}")
         return path
     except Exception as e:
@@ -89,8 +101,14 @@ def download_from_s3(bucket, folder, s3objpath):
 def mongorestore(uri, rfolder):
     try:
         command = ["mongorestore", "--uri", uri, rfolder]
-        subprocess.run(command, check=True)
-        logging.info("Restore completed successfully.")
+        with open("app.log", "a") as f:
+            print("Restore started successfully.")
+            result = subprocess.run(
+                command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            f.write(result.stdout.decode("utf-8"))
+            f.write(result.stderr.decode("utf-8"))
+            print("Restore completed successfully.")
     except subprocess.CalledProcessError as e:
         logging.error(f"Restore failed: {e}")
 
@@ -100,14 +118,20 @@ def cleanup_backups(bucket):
     four_days_ago = datetime.now() - timedelta(days=4)
     four_days_ago = four_days_ago.date()
     try:
-        for i in range(1, max_backups):
-            folder = s3.list_objects_v2(Bucket=bucket, Prefix=f"{four_days_ago}_{i}")
-            if "Contents" in folder:
+        i = 1
+        while "Contents" in s3.list_objects_v2(
+            Bucket=bucket, Prefix=f"{four_days_ago}_{i}"
+        ):
+            if "Contents" in s3.list_objects_v2(
+                Bucket=bucket, Prefix=f"{four_days_ago}_{i+1}"
+            ):
                 boto3.resource("s3").Bucket(bucket).objects.filter(
                     Prefix=f"{four_days_ago}_{i}"
                 ).delete()
             else:
-                logging.info(f"No backup exist for date {four_days_ago}_{i}.")
+                logging.info(f"No backup exist for date {four_days_ago}_{i+1}.")
+                logging.info(f"backup kept for date {four_days_ago}_{i}.")
+            i += 1
     except Exception as e:
         logging.error(f"Backup cleaning failed: {e}")
 
@@ -115,9 +139,15 @@ def cleanup_backups(bucket):
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="AWS S3 & MongoDB Script")
-    parser.add_argument("--backup", action="store_true", help="Perform backup operation")
-    parser.add_argument("--restore", action="store_true", help="Perform restore operation")
-    parser.add_argument("--cleanup", action="store_true", help="Perform cleanup operation")
+    parser.add_argument(
+        "--backup", action="store_true", help="Perform backup operation"
+    )
+    parser.add_argument(
+        "--restore", action="store_true", help="Perform restore operation"
+    )
+    parser.add_argument(
+        "--cleanup", action="store_true", help="Perform cleanup operation"
+    )
 
     args = parser.parse_args()
 
@@ -130,12 +160,12 @@ if __name__ == "__main__":
     max_backups = int(os.getenv("max_backups"))
     # rfolder = os.getenv("restorefolder")
 
-    folder=None
-    rfolder=None
+    folder = None
+    rfolder = None
 
     if args.backup:
         mongodump(source_uri, outpath)
-        folder = uploadtos3(outpath, bucket, max_backups)
+        uploadtos3(outpath, bucket, max_backups)
     if args.restore:
         download_from_s3(bucket, folder, s3objpath)
         rfolder = os.path.join(s3objpath, folder)
@@ -148,5 +178,4 @@ if __name__ == "__main__":
         download_from_s3(bucket, folder, s3objpath)
         rfolder = os.path.join(s3objpath, folder)
         mongorestore(destination_uri, rfolder)
-
-
+        cleanup_backups(bucket)
