@@ -127,8 +127,11 @@ if __name__ == "__main__":
     # folder = os.getenv("folder")
     s3objpath = os.getenv("s3objpath")
     destination_uri = os.getenv("destination_uri")
-    max_backups = os.getenv("max_backups")
+    max_backups = int(os.getenv("max_backups"))
     # rfolder = os.getenv("restorefolder")
+
+    folder=None
+    rfolder=None
 
     if args.backup:
         mongodump(source_uri, outpath)
