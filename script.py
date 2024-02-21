@@ -11,7 +11,7 @@ load_dotenv()
 logging.basicConfig(filename="app.log", level=logging.INFO)
 
 
-def mongodump(uri, outpath):
+def mongodump(uri, outpath, log_file):
     command = [
         "mongodump",
         "--uri",
@@ -20,14 +20,14 @@ def mongodump(uri, outpath):
         outpath,
     ]
     try:
-        with open("app.log", "a") as f:
-            print("Backup started successfully.")
+        with open(log_file, "a") as f:
+            logging.info("Backup started successfully.")
             result = subprocess.run(
                 command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
             )
             f.write(result.stdout.decode("utf-8"))
             f.write(result.stderr.decode("utf-8"))
-            print("Backup completed successfully.")
+            logging.info("Backup completed successfully.")
     except subprocess.CalledProcessError as e:
         logging.error(f"Backup failed: {e}")
 
@@ -92,48 +92,69 @@ def download_from_s3(bucket, folder, s3objpath):
                 ),
                 "wb",
             ) as f:
-                s3.download_fileobj(bucket, key, f)
+                s3.download_fileobj(
+                    bucket, key, f, Callback=ProgressPercentage(f, "app.log")
+                )
             logging.info("file with key: " + key + " downloaded from s3")
     except Exception as e:
         logging.error(f"Backup failed: {e}")
 
 
-def mongorestore(uri, rfolder):
+def mongorestore(uri, rfolder, log_file):
     try:
         command = ["mongorestore", "--uri", uri, rfolder]
-        with open("app.log", "a") as f:
-            print("Restore started successfully.")
+        with open(log_file, "a") as f:
+            logging.info("Restore started successfully.")
             result = subprocess.run(
                 command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
             )
             f.write(result.stdout.decode("utf-8"))
             f.write(result.stderr.decode("utf-8"))
-            print("Restore completed successfully.")
+            logging.info("Restore completed successfully.")
     except subprocess.CalledProcessError as e:
         logging.error(f"Restore failed: {e}")
 
 
-def cleanup_backups(bucket):
+def cleanup_backups(bucket, go_back_n_days):
     s3 = boto3.client("s3")
-    four_days_ago = datetime.now() - timedelta(days=4)
+    four_days_ago = datetime.now() - timedelta(days=go_back_n_days)
     four_days_ago = four_days_ago.date()
     try:
         i = 1
         while "Contents" in s3.list_objects_v2(
-            Bucket=bucket, Prefix=f"{four_days_ago}_{i}"
+            Bucket=bucket, Prefix=f"{four_days_ago}_{i+1}"
         ):
-            if "Contents" in s3.list_objects_v2(
-                Bucket=bucket, Prefix=f"{four_days_ago}_{i+1}"
-            ):
-                boto3.resource("s3").Bucket(bucket).objects.filter(
-                    Prefix=f"{four_days_ago}_{i}"
-                ).delete()
-            else:
-                logging.info(f"No backup exist for date {four_days_ago}_{i+1}.")
-                logging.info(f"backup kept for date {four_days_ago}_{i}.")
+            boto3.resource("s3").Bucket(bucket).objects.filter(
+                Prefix=f"{four_days_ago}_{i}"
+            ).delete()
+            logging.info(f"backup deleted for date {four_days_ago}_{i}.")
             i += 1
+        logging.info("clean backup operation completed successfully")
     except Exception as e:
         logging.error(f"Backup cleaning failed: {e}")
+
+
+def get_folder(bucket_name):
+    s3 = boto3.client("s3")
+
+    # List objects in the bucket
+    response = s3.list_objects_v2(Bucket=bucket_name)
+
+    # Extract folder names from object keys
+    folder_names = set()
+    if "Contents" in response:
+        for obj in response["Contents"]:
+            key = obj["Key"]
+            # Extract folder name
+            folder_name = key.split("/")[0]
+            if folder_name:
+                folder_names.add(folder_name)
+    folder_names = sorted(
+        folder_names,
+        key=lambda x: (x.split("_")[0], int(x.split("_")[1])),
+        reverse=True,
+    )
+    return folder_names[0]
 
 
 if __name__ == "__main__":
@@ -148,34 +169,41 @@ if __name__ == "__main__":
     parser.add_argument(
         "--cleanup", action="store_true", help="Perform cleanup operation"
     )
+    parser.add_argument("folder", type=str, nargs="?", help="Path to the folder")
 
     args = parser.parse_args()
 
     source_uri = os.getenv("source_uri")
     outpath = os.getenv("outpath")
     bucket = os.getenv("bucket")
-    # folder = os.getenv("folder")
     s3objpath = os.getenv("s3objpath")
     destination_uri = os.getenv("destination_uri")
     max_backups = int(os.getenv("max_backups"))
-    # rfolder = os.getenv("restorefolder")
+    log_file = os.getenv("log_file_path")
+    go_back_n_days = int(os.getenv("go_back_n_days"))
 
     folder = None
     rfolder = None
 
     if args.backup:
-        mongodump(source_uri, outpath)
+        mongodump(source_uri, outpath, log_file)
         uploadtos3(outpath, bucket, max_backups)
     if args.restore:
-        download_from_s3(bucket, folder, s3objpath)
-        rfolder = os.path.join(s3objpath, folder)
-        mongorestore(destination_uri, rfolder)
+        if args.folder is not None:
+            download_from_s3(bucket, args.folder, s3objpath)
+            rfolder = os.path.join(s3objpath, args.folder)
+            mongorestore(destination_uri, rfolder, log_file)
+        else:
+            folder = get_folder(bucket)
+            download_from_s3(bucket, folder, s3objpath)
+            rfolder = os.path.join(s3objpath, folder)
+            mongorestore(destination_uri, rfolder, log_file)
     if args.cleanup:
-        cleanup_backups(bucket)
+        cleanup_backups(bucket, go_back_n_days)
     else:
-        mongodump(source_uri, outpath)
+        mongodump(source_uri, outpath, log_file)
         folder = uploadtos3(outpath, bucket, max_backups)
         download_from_s3(bucket, folder, s3objpath)
         rfolder = os.path.join(s3objpath, folder)
-        mongorestore(destination_uri, rfolder)
-        cleanup_backups(bucket)
+        mongorestore(destination_uri, rfolder, log_file)
+        cleanup_backups(bucket, go_back_n_days)
