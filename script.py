@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 load_dotenv()
-logging.basicConfig(filename="app.log", level=logging.INFO)
+logging.basicConfig(filename=os.getenv("log_file_path"), level=logging.INFO)
 
 
 def mongodump(uri, outpath, log_file):
@@ -32,7 +32,7 @@ def mongodump(uri, outpath, log_file):
         logging.error(f"Backup failed: {e}")
 
 
-def uploadtos3(outpath, bucket, max_backups):
+def uploadtos3(outpath, bucket, max_backups, log_file):
     s3 = boto3.client("s3")
     current_date = datetime.now().date()
     path = None
@@ -66,7 +66,7 @@ def uploadtos3(outpath, bucket, max_backups):
                     local_path,
                     bucket,
                     key,
-                    Callback=ProgressPercentage(local_path, "app.log"),
+                    Callback=ProgressPercentage(local_path, log_file),
                 )
                 logging.info(f"File uploaded successfully: {key}")
         return path
@@ -74,7 +74,7 @@ def uploadtos3(outpath, bucket, max_backups):
         logging.error(f"An error occurred: {e}")
 
 
-def download_from_s3(bucket, folder, s3objpath):
+def download_from_s3(bucket, folder, s3objpath, log_file):
     s3 = boto3.client("s3")
     try:
         objects = s3.list_objects_v2(Bucket=bucket, Prefix=folder)["Contents"]
@@ -92,9 +92,7 @@ def download_from_s3(bucket, folder, s3objpath):
                 ),
                 "wb",
             ) as f:
-                s3.download_fileobj(
-                    bucket, key, f, Callback=ProgressPercentage(f, "app.log")
-                )
+                s3.download_fileobj(bucket, key, f)
             logging.info("file with key: " + key + " downloaded from s3")
     except Exception as e:
         logging.error(f"Backup failed: {e}")
@@ -117,17 +115,17 @@ def mongorestore(uri, rfolder, log_file):
 
 def cleanup_backups(bucket, go_back_n_days):
     s3 = boto3.client("s3")
-    four_days_ago = datetime.now() - timedelta(days=go_back_n_days)
-    four_days_ago = four_days_ago.date()
+    days_ago = datetime.now() - timedelta(days=go_back_n_days)
+    days_ago = days_ago.date()
     try:
         i = 1
         while "Contents" in s3.list_objects_v2(
-            Bucket=bucket, Prefix=f"{four_days_ago}_{i+1}"
+            Bucket=bucket, Prefix=f"{days_ago}_{i+1}"
         ):
             boto3.resource("s3").Bucket(bucket).objects.filter(
-                Prefix=f"{four_days_ago}_{i}"
+                Prefix=f"{days_ago}_{i}"
             ).delete()
-            logging.info(f"backup deleted for date {four_days_ago}_{i}.")
+            logging.info(f"backup deleted for date {days_ago}_{i}.")
             i += 1
         logging.info("clean backup operation completed successfully")
     except Exception as e:
@@ -154,6 +152,7 @@ def get_folder(bucket_name):
         key=lambda x: (x.split("_")[0], int(x.split("_")[1])),
         reverse=True,
     )
+    logging.info(f"latest folder for backup : {folder_names[0]}")
     return folder_names[0]
 
 
@@ -187,23 +186,23 @@ if __name__ == "__main__":
 
     if args.backup:
         mongodump(source_uri, outpath, log_file)
-        uploadtos3(outpath, bucket, max_backups)
-    if args.restore:
+        uploadtos3(outpath, bucket, max_backups, log_file)
+    elif args.restore:
         if args.folder is not None:
-            download_from_s3(bucket, args.folder, s3objpath)
+            download_from_s3(bucket, args.folder, s3objpath, log_file)
             rfolder = os.path.join(s3objpath, args.folder)
             mongorestore(destination_uri, rfolder, log_file)
         else:
             folder = get_folder(bucket)
-            download_from_s3(bucket, folder, s3objpath)
+            download_from_s3(bucket, folder, s3objpath, log_file)
             rfolder = os.path.join(s3objpath, folder)
             mongorestore(destination_uri, rfolder, log_file)
-    if args.cleanup:
+    elif args.cleanup:
         cleanup_backups(bucket, go_back_n_days)
     else:
         mongodump(source_uri, outpath, log_file)
-        folder = uploadtos3(outpath, bucket, max_backups)
-        download_from_s3(bucket, folder, s3objpath)
+        folder = uploadtos3(outpath, bucket, max_backups, log_file)
+        download_from_s3(bucket, folder, s3objpath, log_file)
         rfolder = os.path.join(s3objpath, folder)
         mongorestore(destination_uri, rfolder, log_file)
         cleanup_backups(bucket, go_back_n_days)
