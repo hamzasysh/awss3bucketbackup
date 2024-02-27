@@ -1,0 +1,4 @@
+*.log
+.flake8
+__pycache__/
+s.py
