@@ -20,39 +20,40 @@ def mongodump(uri, outpath, log_file):
         outpath,
     ]
     try:
+        logging.info("mongodump: Backup started successfully.")
         with open(log_file, "a") as f:
-            logging.info("Backup started successfully.")
             result = subprocess.run(
                 command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
             )
             f.write(result.stdout.decode("utf-8"))
             f.write(result.stderr.decode("utf-8"))
-            logging.info("Backup completed successfully.")
+        logging.info("mongodump: Backup completed successfully.")
     except subprocess.CalledProcessError as e:
-        logging.error(f"Backup failed: {e}")
-        
-    return
+        logging.error(f"mongodump: Backup failed. {e}")
 
 
-def uploadtos3(outpath, bucket, max_backups, log_file):
+def find_upload_path(bucket, max_backups):
     s3 = boto3.client("s3")
     current_date = datetime.now().date()
-    path = None
     datestr = None
 
+    for i in range(1, max_backups + 1):
+        temp = s3.list_objects_v2(Bucket=bucket, Prefix=f"{current_date}_{i}")
+        if "Contents" in temp:
+            datestr = f"{current_date}_{i}"
+    if datestr:
+        no = int(datestr.split("_")[1])
+        if no == max_backups:
+            logging.error("find_upload_path: Today's Backups are already stored. Come Back tomorrow")
+            return
+        return f"{current_date}_{no + 1}"
+    else:
+        return f"{current_date}_1"
+
+
+def uploadtos3(outpath, bucket, s3folder, log_file):
+    s3 = boto3.client("s3")
     try:
-        for i in range(1, max_backups + 1):
-            temp = s3.list_objects_v2(Bucket=bucket, Prefix=f"{current_date}_{i}")
-            if "Contents" in temp:
-                datestr = f"{current_date}_{i}"
-        if datestr:
-            no = int(datestr.split("_")[1])
-            if no == max_backups:
-                logging.error("Today's Backups are already stored. Come Back tomorrow")
-                return
-            path = f"{current_date}_{no + 1}"
-        else:
-            path = f"{current_date}_1"
         for root, _, files in os.walk(outpath):
             if (root == "admin") or (root == "config") or (root == "local"):
                 continue
@@ -60,23 +61,21 @@ def uploadtos3(outpath, bucket, max_backups, log_file):
                 local_path = os.path.join(root, file)
                 if file.endswith(".metadata.json"):
                     key = (
-                        f"{path}/{os.path.split(root)[-1]}/{file.split('.')[0]}/{file}"
+                        f"{s3folder}/{os.path.split(root)[-1]}/{file.split('.')[0]}/{file}"
                     )
                 else:
-                    key = f"{path}/{os.path.split(root)[-1]}/{os.path.splitext(file)[0]}/{file}"
+                    key = f"{s3folder}/{os.path.split(root)[-1]}/{os.path.splitext(file)[0]}/{file}"
                 s3.upload_file(
                     local_path,
                     bucket,
                     key,
                     Callback=ProgressPercentage(local_path, log_file),
                 )
-                logging.info(f"File uploaded successfully: {key}")
-        return path
+                logging.info(f"uploadtos3: File uploaded successfully. {key}")
     except Exception as e:
-        logging.error(f"An error occurred: {e}")
-    return
+        logging.error(f"uploadtos3: An error occurred. {e}")
 
-def download_from_s3(bucket, folder, s3objpath, log_file):
+def download_from_s3(bucket, folder, s3objpath):
     s3 = boto3.client("s3")
     try:
         objects = s3.list_objects_v2(Bucket=bucket, Prefix=folder)["Contents"]
@@ -88,30 +87,25 @@ def download_from_s3(bucket, folder, s3objpath, log_file):
                 os.makedirs(
                     os.path.join(s3objpath, key.split("/")[0], key.split("/")[1])
                 )
-            with open(
-                os.path.join(
-                    s3objpath, key.split("/")[0], key.split("/")[1], key.split("/")[3]
-                ),
-                "wb",
-            ) as f:
-                s3.download_fileobj(bucket, key, f)
-            logging.info("file with key: " + key + " downloaded from s3")
+            local_path = os.path.join(s3objpath, key.split("/")[0], key.split("/")[1], key.split("/")[3])
+            s3.download_file(bucket, key, local_path)
+            logging.info("download_from_s3: file with key: " + key + " downloaded from s3")
     except Exception as e:
-        logging.error(f"Backup failed: {e}")
-    return
+        logging.error(f"download_from_s3: Backup failed. {e}")
+
 
 def mongorestore(uri, rfolder, log_file):
+    command = ["mongorestore", "--uri", uri, rfolder]
     try:
-        command = ["mongorestore", "--uri", uri, rfolder]
+        logging.info("mongorestore: Restore started successfully.")
         with open(log_file, "a") as f:
-            logging.info("Restore started successfully.")
             result = subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             f.write(result.stdout.decode("utf-8"))
             f.write(result.stderr.decode("utf-8"))
-            logging.info("Restore completed successfully.")
+        logging.info("mongorestore: Restore completed successfully.")
     except subprocess.CalledProcessError as e:
-        logging.error(f"Restore failed: {e}")
-    return
+        logging.error(f"mongorestore: Restore failed. {e}")
+
 
 def cleanup_backups(bucket, go_back_n_days):
     s3 = boto3.client("s3")
@@ -125,12 +119,12 @@ def cleanup_backups(bucket, go_back_n_days):
             boto3.resource("s3").Bucket(bucket).objects.filter(
                 Prefix=f"{days_ago}_{i}"
             ).delete()
-            logging.info(f"backup deleted for date {days_ago}_{i}.")
+            logging.info(f"cleanup_backups: backup deleted for date {days_ago}_{i}.")
             i += 1
-        logging.info("clean backup operation completed successfully")
+        logging.info("cleanup_backups: clean backup operation completed successfully")
     except Exception as e:
-        logging.error(f"Backup cleaning failed: {e}")
-    return
+        logging.error(f"cleanup_backups: Backup cleaning failed. {e}")
+
 
 def get_folder(bucket_name):
     s3 = boto3.client("s3")
@@ -152,22 +146,16 @@ def get_folder(bucket_name):
         key=lambda x: (x.split("_")[0], int(x.split("_")[1])),
         reverse=True,
     )
-    logging.info(f"latest folder for backup : {folder_names[0]}")
+    logging.info(f"get_folder: latest folder for backup. {folder_names[0]}")
     return folder_names[0]
+
 
 def main():
     parser = argparse.ArgumentParser(description="AWS S3 & MongoDB Script")
-    parser.add_argument(
-        "--backup", action="store_true", help="Perform backup operation"
-    )
-    parser.add_argument(
-        "--restore", action="store_true", help="Perform restore operation"
-    )
-    parser.add_argument(
-        "--cleanup", action="store_true", help="Perform cleanup operation"
-    )
+    parser.add_argument("--backup", action="store_true", help="Perform backup operation")
+    parser.add_argument("--restore", action="store_true", help="Perform restore operation")
+    parser.add_argument("--cleanup", action="store_true", help="Perform cleanup operation")
     parser.add_argument("folder", type=str, nargs="?", help="Path to the folder")
-
     args = parser.parse_args()
 
     try:
@@ -180,56 +168,42 @@ def main():
         log_file = os.getenv("log_file_path")
         go_back_n_days = int(os.getenv("go_back_n_days"))
     except Exception as e:
-        print("Error in getting variables from env", e)
+        logging.error(f"main: Error in getting variables from env. {e}")
         return
-        
-    folder = None
-    rfolder = None
 
     if args.backup:
-        try:
-            mongodump(source_uri, outpath, log_file)
-            uploadtos3(outpath, bucket, max_backups, log_file)
-        except Exception as e:
-            print("Error in backup", e)
+        folder = find_upload_path(bucket, max_backups)
+        if not folder:
             return
+
+        mongodump(source_uri, outpath, log_file)
+        uploadtos3(outpath, bucket, max_backups, log_file)
     elif args.restore:
-        try:
-            if args.folder is not None:
-                download_from_s3(bucket, args.folder, s3objpath, log_file)
-                rfolder = os.path.join(s3objpath, args.folder)
-                mongorestore(destination_uri, rfolder, log_file)
-            else:
-                folder = get_folder(bucket)
-                download_from_s3(bucket, folder, s3objpath, log_file)
-                rfolder = os.path.join(s3objpath, folder)
-                mongorestore(destination_uri, rfolder, log_file)
-        except Exception as e:
-            print("Error in restore", e)
-            return
-    elif args.cleanup:
-        try:
-            cleanup_backups(bucket, go_back_n_days)
-        except Exception as e:
-            print("Error in cleanup_backups", e)
-            return
-    else:
-        try:
-            mongodump(source_uri, outpath, log_file)
-            folder = uploadtos3(outpath, bucket, max_backups, log_file)
-            download_from_s3(bucket, folder, s3objpath, log_file)
+        if args.folder:
+            download_from_s3(bucket, args.folder, s3objpath)
+            rfolder = os.path.join(s3objpath, args.folder)
+            mongorestore(destination_uri, rfolder, log_file)
+        else:
+            folder = get_folder(bucket)
+            download_from_s3(bucket, folder, s3objpath)
             rfolder = os.path.join(s3objpath, folder)
             mongorestore(destination_uri, rfolder, log_file)
-            try:
-                cleanup_backups(bucket, go_back_n_days)
-            except Exception as e:
-                print("Error in cleanup backup because", e)
-        except Exception as e:
-            print("Error in dumping and restoring data to AWS because: ", e)
+    elif args.cleanup:
+        cleanup_backups(bucket, go_back_n_days)
+    else:
+        folder = find_upload_path(bucket, max_backups)
+        if not folder:
+            return
+        
+        mongodump(source_uri, outpath, log_file)
+        uploadtos3(outpath, bucket, max_backups, log_file)
+        download_from_s3(bucket, folder, s3objpath)
+        rfolder = os.path.join(s3objpath, folder)
+        mongorestore(destination_uri, rfolder, log_file)
+        cleanup_backups(bucket, go_back_n_days)
 
-    return
-    
-    
+
 if __name__ == "__main__":
+    print(f'Script running...')
     main()
-    
+    print(f'Script finished. Check logs')
